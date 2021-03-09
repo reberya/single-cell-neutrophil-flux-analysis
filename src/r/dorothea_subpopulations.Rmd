@@ -1,0 +1,370 @@
+---
+title: "dorothea_subpopulations"
+author: "Ryan Rebernick"
+date: "2/25/2021"
+output: html_document
+---
+
+# 1. Load packages and data
+```{r, warning=F, message=F}
+
+library('plyr')
+library('dplyr')
+library('magrittr')
+library('data.table')
+
+library(dorothea)
+library(Seurat)
+library(tibble)
+library(pheatmap)
+library(tidyr)
+library(viper)
+
+load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/Dorothea/data/lung.Robj')
+
+```
+
+# 2. Create function that will perform all downstream preprocessing steps.
+For more in-depth sanity checking, you can check out the `eda_all_genes.Rmd` file. In short, the following is performed:
+  1. Identify variable features
+  2. Log normalize the data
+  3. Scale the data 
+  4. Run PCA
+  5. Identify shortest nearest neighbors and clusters
+  6. Perform UMAP
+  
+```{r}
+# note: added option to forgo sct and include vars to regress so initial qc steps could be run via this function
+process_data = function(gene_obj, scTransform = F, varsToRegress = NULL){
+  
+  # Identify variable features
+  gene_obj = FindVariableFeatures(object=gene_obj, 
+                              mean.function=ExpMean,
+                              dispersion.function=LogVMR,
+                              selection.method='vst',
+                              x.low.cutoff=-Inf,
+                              x.high.cutoff=Inf,
+                              y.cutoff=Inf,
+                              nfeatures = 2000)
+  
+  # Log normalize data
+  gene_obj = NormalizeData(gene_obj, 
+                       normalization.method='LogNormalize', 
+                       scale.factor=10000)
+  
+  # Scale data
+  all.genes = rownames(gene_obj)
+  gene_obj = ScaleData(gene_obj, 
+                   features=all.genes)
+  
+  # SCT transform
+  if(scTransform == T){
+    gene_obj = SCTransform(gene_obj,
+                           vars.to.regress = varsToRegress,
+                           verbose=F)
+  }
+  
+  # Run PCA
+  gene_obj = RunPCA(object=gene_obj,
+                npcs=50,
+                verbose=FALSE)
+  
+  # Find shortest nearest neighbors and clusters
+  gene_obj = FindNeighbors(gene_obj, 
+                       dims=1:50,
+                       reduction='pca')
+  gene_obj = FindClusters(gene_obj, 
+                      resolution=0.5)
+  
+  # Perform UMAP
+  gene_obj = RunUMAP(gene_obj, 
+                 dims=1:50)
+  
+  return(gene_obj)
+}
+```
+
+# 3. Perform subclustering on Neutrophils
+This analysis subsets based on predicted clusters.
+```{r, warning=F, message=F}
+
+# get neutrophils
+neutrophils <- subset(lung, idents = 'Neutrophils')
+neutrophils$dxHl <- ifelse(grepl('\\.h\\.', neutrophils$sample), 'Hlthy', 'Dx')
+
+# process data with above fxn
+neutrophils = process_data(neutrophils, scTransform = T, varsToRegress = NULL)
+
+neutrophils$subcluster <- Idents(neutrophils)
+
+```
+
+
+
+# REPLACE MY CLUSTERING WITH SCOTTS
+Despite using same code, I create 5 total clusters of neutrophils vs his produced 4. A package error is suspected as he is using seruat version 3 while I am using 4. Load his Robj instead and proceed with the analysis
+```{r}
+
+load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/Dorothea/data/neut_SEC.robj')
+
+# Modify object to match one i created
+neutrophils$subcluster <- neutrophils$seurat_clusters
+neutrophils$dxHl <- ifelse(grepl('\\.h\\.', neutrophils$sample), 'Hlthy', 'Dx')
+
+```
+
+
+
+
+
+
+
+
+# 4. Use DORTHEA to identify TFs active in neutrophil subpopulations
+```{r}
+
+# Regulons for mouse
+dorothea_regulon_mouse <- get(data("dorothea_mm", package = "dorothea"))
+
+## We obtain the regulons based on interactions with confidence level A, B and C
+regulon <- dorothea_regulon_mouse %>%
+    dplyr::filter(confidence %in% c("A","B","C"))
+
+## We compute Viper Scores 
+neutrophils <- run_viper(neutrophils, regulon,
+                  options = list(method = "scale", minsize = 4, 
+                                 eset.filter = FALSE, cores = 1, 
+                                 verbose = FALSE))
+
+
+## We compute the Nearest Neighbours to perform cluster
+DefaultAssay(object = neutrophils) <- "dorothea"
+neutrophils <- ScaleData(neutrophils)
+neutrophils <- RunPCA(neutrophils, features = rownames(neutrophils), verbose = FALSE)
+neutrophils <- FindNeighbors(neutrophils, dims = 1:10, verbose = FALSE)
+neutrophils <- FindClusters(neutrophils, resolution = 0.5, verbose = FALSE)
+
+neutrophils <- RunUMAP(neutrophils, dims = 1:10, umap.method = "uwot", metric = "cosine")
+
+neutrophils.markers <- FindAllMarkers(neutrophils, only.pos = TRUE, min.pct = 0.25, 
+                               logfc.threshold = 0.25, verbose = FALSE)
+
+
+Idents(neutrophils) <- paste0('D', Idents(neutrophils))
+# Plot
+DimPlot(neutrophils, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+# store TF activity clustering info
+neutrophils$dorotheaClust <- Idents(neutrophils)
+
+# overlay previous subclustering info
+Idents(neutrophils) <- neutrophils$subcluster
+DimPlot(neutrophils, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+# overlay healthy/disease info
+Idents(neutrophils) <- neutrophils$dxHl
+DimPlot(neutrophils, reduction = "umap", label = TRUE, pt.size = 0.5, , cols = c('black', 'chartreuse'))
+
+# overlay sample info
+Idents(neutrophils) <- neutrophils$sample
+DimPlot(neutrophils, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+```
+
+# 5. Use Dorthea to predict TFs based on TF-based clustering info
+```{r}
+
+# Reset identities to dorthea clustering
+Idents(neutrophils) <- neutrophils$dorotheaClust
+
+## We transform Viper scores, scaled by seurat, into a data frame to better 
+## handling the results
+viper_scores_df <- GetAssayData(neutrophils, slot = "scale.data", 
+                                    assay = "dorothea") %>%
+  data.frame(check.names = F) %>%
+  t()
+
+## We create a data frame containing the cells and their clusters
+CellsClusters <- data.frame(cell = names(Idents(neutrophils)), 
+                            cell_type = as.character(Idents(neutrophils)),
+                            check.names = F)
+
+## We create a data frame with the Viper score per cell and its clusters
+viper_scores_clusters <- viper_scores_df  %>%
+  data.frame() %>% 
+  rownames_to_column("cell") %>%
+  gather(tf, activity, -cell) %>%
+  inner_join(CellsClusters)
+
+## We summarize the Viper scores by cellpopulation
+summarized_viper_scores <- viper_scores_clusters %>% 
+  dplyr::group_by(tf, cell_type) %>%
+  dplyr::summarise(avg = mean(activity),
+            std = sd(activity))
+
+
+## We select the 20 most variable TFs. (20*9 populations = 180)
+highly_variable_tfs <- summarized_viper_scores %>%
+  dplyr::group_by(tf) %>%
+  dplyr::mutate(var = var(avg))  %>%
+  ungroup() %>%
+  top_n(180, var) %>%
+  distinct(tf)
+
+## We prepare the data for the plot
+summarized_viper_scores_df <- summarized_viper_scores %>%
+  semi_join(highly_variable_tfs, by = "tf") %>%
+  dplyr::select(-std) %>%   
+  spread(tf, avg) %>%
+  data.frame(row.names = 1, check.names = FALSE) 
+
+# plot
+palette_length = 100
+my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+
+my_breaks <- c(seq(min(summarized_viper_scores_df), 0, 
+                   length.out=ceiling(palette_length/2) + 1),
+               seq(max(summarized_viper_scores_df)/palette_length, 
+                   max(summarized_viper_scores_df), 
+                   length.out=floor(palette_length/2)))
+
+viper_hmap <- pheatmap(t(summarized_viper_scores_df),fontsize=14, 
+                       fontsize_row = 10, 
+                       color=my_color, breaks = my_breaks, 
+                       main = "DoRothEA (ABC)", angle_col = 45,
+                       treeheight_col = 0,  border_color = NA)
+
+```
+#### 6. Use Dorthea to predict TFs based on previous subclustering analysis
+```{r}
+
+# Reset identities to dorthea clustering
+Idents(neutrophils) <- neutrophils$subcluster
+
+## We transform Viper scores, scaled by seurat, into a data frame to better 
+## handling the results
+viper_scores_df <- GetAssayData(neutrophils, slot = "scale.data", 
+                                    assay = "dorothea") %>%
+  data.frame(check.names = F) %>%
+  t()
+
+## We create a data frame containing the cells and their clusters
+CellsClusters <- data.frame(cell = names(Idents(neutrophils)), 
+                            cell_type = as.character(Idents(neutrophils)),
+                            check.names = F)
+
+## We create a data frame with the Viper score per cell and its clusters
+viper_scores_clusters <- viper_scores_df  %>%
+  data.frame() %>% 
+  rownames_to_column("cell") %>%
+  gather(tf, activity, -cell) %>%
+  inner_join(CellsClusters)
+
+## We summarize the Viper scores by cellpopulation
+summarized_viper_scores <- viper_scores_clusters %>% 
+  dplyr::group_by(tf, cell_type) %>%
+  dplyr::summarise(avg = mean(activity),
+            std = sd(activity))
+
+
+## We select the 20 most variable TFs. (20*9 populations = 180)
+highly_variable_tfs <- summarized_viper_scores %>%
+  dplyr::group_by(tf) %>%
+  dplyr::mutate(var = var(avg))  %>%
+  ungroup() %>%
+  top_n(180, var) %>%
+  distinct(tf)
+
+## We prepare the data for the plot
+summarized_viper_scores_df <- summarized_viper_scores %>%
+  semi_join(highly_variable_tfs, by = "tf") %>%
+  dplyr::select(-std) %>%   
+  spread(tf, avg) %>%
+  data.frame(row.names = 1, check.names = FALSE) 
+
+# plot
+palette_length = 100
+my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+
+my_breaks <- c(seq(min(summarized_viper_scores_df), 0, 
+                   length.out=ceiling(palette_length/2) + 1),
+               seq(max(summarized_viper_scores_df)/palette_length, 
+                   max(summarized_viper_scores_df), 
+                   length.out=floor(palette_length/2)))
+
+viper_hmap <- pheatmap(t(summarized_viper_scores_df),fontsize=14, 
+                       fontsize_row = 10, 
+                       color=my_color, breaks = my_breaks, 
+                       main = "DoRothEA (ABC)", angle_col = 45,
+                       treeheight_col = 0,  border_color = NA)
+
+```
+
+# 7. Combine original groups based on clustering similarities
+# ```{r, fig.height=8}
+# 
+# # combine clusters
+# neutrophils$subcluster <- as.character(neutrophils$subcluster)
+# neutrophils$combClust <- ifelse(neutrophils$subcluster %in% c(0,4), '0-4', neutrophils$subcluster)
+# neutrophils$combClust <- ifelse(neutrophils$combClust %in% c(1,2), '1-2', neutrophils$combClust)
+# Idents(neutrophils) <- neutrophils$combClust
+# 
+# ## We transform Viper scores, scaled by seurat, into a data frame to better 
+# ## handling the results
+# viper_scores_df <- GetAssayData(neutrophils, slot = "scale.data", 
+#                                     assay = "dorothea") %>%
+#   data.frame(check.names = F) %>%
+#   t()
+# 
+# ## We create a data frame containing the cells and their clusters
+# CellsClusters <- data.frame(cell = names(Idents(neutrophils)), 
+#                             cell_type = as.character(Idents(neutrophils)),
+#                             check.names = F)
+# 
+# ## We create a data frame with the Viper score per cell and its clusters
+# viper_scores_clusters <- viper_scores_df  %>%
+#   data.frame() %>% 
+#   rownames_to_column("cell") %>%
+#   gather(tf, activity, -cell) %>%
+#   inner_join(CellsClusters)
+# 
+# ## We summarize the Viper scores by cellpopulation
+# summarized_viper_scores <- viper_scores_clusters %>% 
+#   dplyr::group_by(tf, cell_type) %>%
+#   dplyr::summarise(avg = mean(activity),
+#             std = sd(activity))
+# 
+# 
+# ## We select the 20 most variable TFs. (20*9 populations = 180)
+# highly_variable_tfs <- summarized_viper_scores %>%
+#   dplyr::group_by(tf) %>%
+#   dplyr::mutate(var = var(avg))  %>%
+#   ungroup() %>%
+#   top_n(180, var) %>%
+#   distinct(tf)
+# 
+# ## We prepare the data for the plot
+# summarized_viper_scores_df <- summarized_viper_scores %>%
+#   semi_join(highly_variable_tfs, by = "tf") %>%
+#   dplyr::select(-std) %>%   
+#   spread(tf, avg) %>%
+#   data.frame(row.names = 1, check.names = FALSE) 
+# 
+# # plot
+# palette_length = 100
+# my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+# 
+# my_breaks <- c(seq(min(summarized_viper_scores_df), 0, 
+#                    length.out=ceiling(palette_length/2) + 1),
+#                seq(max(summarized_viper_scores_df)/palette_length, 
+#                    max(summarized_viper_scores_df), 
+#                    length.out=floor(palette_length/2)))
+# 
+# viper_hmap <- pheatmap(t(summarized_viper_scores_df),fontsize=14, 
+#                        fontsize_row = 10, 
+#                        color=my_color, breaks = my_breaks, 
+#                        main = "DoRothEA (ABC)", angle_col = 45,
+#                        treeheight_col = 0,  border_color = NA)
+
+```
+

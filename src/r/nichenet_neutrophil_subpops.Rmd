@@ -1,0 +1,262 @@
+---
+title: "nichenet_neut_subpops"
+author: "Ryan Rebernick"
+date: "2/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+
+# set wd for markdown file
+knitr::opts_knit$set(root.dir = '/nfs/turbo/umms-csriram/scampit/Ryan/Projects/NicheNetR/')
+
+```
+
+#### Load packages
+```{r, message=F, warning=F}
+library('plyr')
+library('dplyr')
+library('magrittr')
+library('stringr')
+library('data.table')
+#devtools::install_github("saeyslab/nichenetr")
+library('nichenetr')
+library('Seurat')
+library('tidyverse')
+library('gplots')
+```
+
+
+
+# 1. Load data
+```{r}
+
+# neutrophils with scott's clustering
+load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/Dorothea/data/neut_SEC.robj')
+neutrophils$dxHl <- ifelse(grepl('\\.h\\.', neutrophils$sample), 'Hlthy', 'Dx') # additional metadata field
+DimPlot(neutrophils, reduction = "umap")
+
+# All lung cells - needs clustering
+load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/Dorothea/data/lung.Robj')
+
+```
+
+# 2. Function to cluster all lung cells
+```{r}
+process_data = function(gene_obj, scTransform = F, varsToRegress = NULL){
+  
+  # Identify variable features
+  gene_obj = FindVariableFeatures(object=gene_obj, 
+                              mean.function=ExpMean,
+                              dispersion.function=LogVMR,
+                              selection.method='vst',
+                              x.low.cutoff=-Inf,
+                              x.high.cutoff=Inf,
+                              y.cutoff=Inf,
+                              nfeatures = 2000)
+  
+  # Log normalize data
+  gene_obj = NormalizeData(gene_obj, 
+                       normalization.method='LogNormalize', 
+                       scale.factor=10000)
+  
+  # Scale data
+  all.genes = rownames(gene_obj)
+  gene_obj = ScaleData(gene_obj, 
+                   features=all.genes)
+  
+  # SCT transform
+  if(scTransform == T){
+    print('SCT activated')
+    gene_obj = SCTransform(gene_obj,
+                           vars.to.regress = varsToRegress,
+                           verbose=F)
+  }
+  
+  # Run PCA
+  gene_obj = RunPCA(object=gene_obj,
+                npcs=50,
+                verbose=FALSE)
+  
+  # Find shortest nearest neighbors and clusters
+  gene_obj = FindNeighbors(gene_obj, 
+                       dims=1:50,
+                       reduction='pca')
+  gene_obj = FindClusters(gene_obj, 
+                      resolution=0.5)
+  
+  # Perform UMAP
+  gene_obj = RunUMAP(gene_obj, 
+                 dims=1:50)
+  
+  return(gene_obj)
+}
+```
+
+# 3. Process/cluster all lung cells
+```{r, warning=F, message=F}
+lung = process_data(lung, scTransform = F, varsToRegress = NULL)
+Idents(lung) <- lung$CellType
+DimPlot(lung, reduction = "umap")
+
+```
+
+
+# 4. Combine Scott's neutrophil clustering data with entire lung object
+This allows analysis with nichenet which looks and sending and recieiving cell types. This step is necessary as we're interested in the signalling between different clusters of neutrophils.
+```{r}
+
+# Create metadata with either granulocyte subcluster or cellType info
+##all lung cells
+subcluster <- as.data.frame(lung$CellType)
+colnames(subcluster) <- 'value'
+##neutrophil cluster info
+toMerge <- as.data.frame(neutrophils$seurat_clusters)
+colnames(toMerge) <- 'value2'
+##merge values
+subcluster <- merge(subcluster, toMerge, all.x = T, by = 0)
+##reformat and rename PRN
+subcluster$value <- as.character(subcluster$value)
+subcluster$value2 <-as.character(subcluster$value2)
+subcluster$value2 <- ifelse(is.na(subcluster$value2), subcluster$value2, paste0('Neutrophils-',subcluster$value2))
+subcluster$value2 <- ifelse(is.na(subcluster$value2), subcluster$value, subcluster$value2)
+rownms <- subcluster$Row.names
+subcluster %<>% dplyr::select(value2)
+rownames(subcluster) <- rownms
+
+# assign to seurat object
+lung$subcluster.celltype <- subcluster
+Idents(lung) <- lung$subcluster.celltype
+
+# add additional metadata fields
+lung$dxHl <- ifelse(grepl('\\.h\\.', lung$sample), 'Hlthy', 'Dx')
+
+# plot
+DimPlot(lung, reduction = "umap") 
+
+```
+
+
+
+# 5. Load data necessary to run nichenet
+
+```{r}
+# Ligand target
+ligand_target_matrix = readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+
+# Ligand receptor
+lr_network = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+
+# weighted integrated network
+weighted_networks = readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+
+
+```
+
+
+# 6. Neutrophil cluster 1
+Cluster 1-3 will be compared to cluster 0, which contains the bulk of the early stage cells
+```{r}
+
+Idents(lung) <- lung$CellType
+nichenet_output = nichenet_seuratobj_aggregate(
+  seurat_obj = lung, 
+  receiver = "Neutrophils", 
+  condition_colname = "subcluster.celltype", condition_oi = "Neutrophils-1", condition_reference = "Neutrophils-0", 
+  sender = "all", 
+  ligand_target_matrix = ligand_target_matrix, lr_network = lr_network, weighted_networks = weighted_networks, organism = "mouse")
+
+# plot target heatmap
+nichenet_output$ligand_activity_target_heatmap
+
+# Receptor interactions
+nichenet_output$ligand_receptor_heatmap
+
+# plot expression of ligands across celltypes by condition
+DotPlot(lung, features = nichenet_output$top_ligands %>% rev(), split.by = "dxHl", dot.min = .1) + RotatedAxis()
+
+# plot expression of receptors across celltypes by condition
+Idents(neutrophils) <- neutrophils$CellType
+DotPlot(neutrophils, features = nichenet_output$top_receptors %>% rev(), group.by = "seurat_clusters", dot.min = .1) + RotatedAxis()
+
+# IL1r2 expression by dx status
+neutrophils$sample <- factor(neutrophils$sample, levels = c('lung.h.d7', 'lung.d.d7', 'lung.h.d14', 'lung.d.d14', 'lung.h.d21', 'lung.d.d21'))
+VlnPlot(neutrophils, features = c("Il1b", "Il1r2"), split.by = "sample",    pt.size = 0, combine = FALSE, 
+        cols = rep(c('blue', 'red'),3))
+
+VlnPlot(neutrophils, features = c("Il1r2"), split.by = "seurat_clusters",    pt.size = 0, combine = FALSE, 
+        cols = c('blue', 'red', 'aquamarine1', 'darkgreen'))
+
+
+
+VlnPlot(neutrophils, features = c("Plaur"), split.by = "seurat_clusters",    pt.size = 0, combine = FALSE, 
+        cols = c('blue', 'red', 'aquamarine1', 'darkgreen'))
+```
+
+# 7. Neutrophils cluster 2
+Cluster 1-3 will be compared to cluster 0, which contains the bulk of the early stage cells
+```{r}
+
+Idents(lung) <- lung$CellType
+nichenet_output = nichenet_seuratobj_aggregate(
+  seurat_obj = lung, 
+  receiver = "Neutrophils", 
+  condition_colname = "subcluster.celltype", condition_oi = "Neutrophils-2", condition_reference = "Neutrophils-0", 
+  sender = "all", 
+  ligand_target_matrix = ligand_target_matrix, lr_network = lr_network, weighted_networks = weighted_networks, organism = "mouse")
+
+# plot target heatmap
+nichenet_output$ligand_activity_target_heatmap
+
+# Receptor interactions
+nichenet_output$ligand_receptor_heatmap
+
+# plot expression of ligands across celltypes by condition
+DotPlot(lung, features = nichenet_output$top_ligands %>% rev(), split.by = "dxHl", dot.min = .1) + RotatedAxis()
+
+# plot expression of receptors across celltypes by condition
+Idents(neutrophils) <- neutrophils$CellType
+DotPlot(neutrophils, features = nichenet_output$top_receptors %>% rev(), group.by = "seurat_clusters", dot.min = .1) + RotatedAxis()
+
+
+```
+
+# 8. Neutrophils cluster 3
+Cluster 1-3 will be compared to cluster 0, which contains the bulk of the early stage cells
+```{r}
+
+Idents(lung) <- lung$CellType
+nichenet_output = nichenet_seuratobj_aggregate(
+  seurat_obj = lung, 
+  receiver = "Neutrophils", 
+  condition_colname = "subcluster.celltype", condition_oi = "Neutrophils-3", condition_reference = "Neutrophils-0", 
+  sender = "all", 
+  ligand_target_matrix = ligand_target_matrix, lr_network = lr_network, weighted_networks = weighted_networks, organism = "mouse")
+
+# plot target heatmap
+nichenet_output$ligand_activity_target_heatmap
+
+# Receptor interactions
+nichenet_output$ligand_receptor_heatmap
+
+
+```
+
+
+# 9. Explore expression of top ranked receptors and ligands
+```{r}
+
+
+
+
+
+
+FeaturePlot(object = neutrophils, 
+            features = ,'Il1r2',
+            cols = c("grey", "blue"), 
+            reduction = "umap")
+
+
+
+```
+

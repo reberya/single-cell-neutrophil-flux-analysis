@@ -1,0 +1,626 @@
+---
+title: "scaf_subpopulations"
+author: "Ryan Rebernick"
+date: "3/1/2021"
+output: html_document
+---
+
+# Load packages and load data file
+Note that loading phate on the the HPC is a HUGE pain.Doing the following things will simplify:
+1) module load python/3.8.7
+2) pip install --user --target=/home/rebernrj/.local/lib/python3.8/site-packages/phate --upgrade phate
+- This overwrites any existing phate distribution in your loaded python directory and installs the dependent packages. Was having problems because pyparsing was referenced in anotehr python install and R would throw an error because it couldn't find it.
+```{r, warning=F, message=F}
+
+library(mgcv)
+library(splines)
+library(Seurat)
+library(tidyverse)
+library(viridis)
+library(matrixStats)
+library(UpSetR)
+library(reshape2)
+library(ggplot2)
+library(phateR)
+library(reticulate)
+#library(MAST)
+
+library(dorothea)
+
+load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/Dorothea/data/pmn.Robj')
+
+```
+
+# Function to process data
+```{r}
+# note: added option to forgo sct and include vars to regress so initial qc steps could be run via this function
+process_data = function(gene_obj, scTransform = F, varsToRegress = NULL, pcs = 10, method = 'UMAP'){
+  
+  # Identify variable features
+  gene_obj = FindVariableFeatures(object=gene_obj, 
+                              mean.function=ExpMean,
+                              dispersion.function=LogVMR,
+                              selection.method='vst',
+                              x.low.cutoff=-Inf,
+                              x.high.cutoff=Inf,
+                              y.cutoff=Inf,
+                              nfeatures = 2000)
+  
+  # Log normalize data
+  gene_obj = NormalizeData(gene_obj, 
+                       normalization.method='LogNormalize', 
+                       scale.factor=10000)
+  
+  # Scale data
+  all.genes = rownames(gene_obj)
+  gene_obj = ScaleData(gene_obj, 
+                   features=all.genes)
+  
+  # SCT transform
+  if(scTransform == T){
+    gene_obj = SCTransform(gene_obj,
+                           vars.to.regress = varsToRegress,
+                           verbose=F)
+  }
+  
+  # Run PCA
+  gene_obj = RunPCA(object=gene_obj,
+                npcs=50,
+                verbose=FALSE)
+  
+  # Find shortest nearest neighbors and clusters
+  gene_obj = FindNeighbors(gene_obj, 
+                       dims=1:pcs,
+                       reduction='pca')
+  gene_obj = FindClusters(gene_obj, 
+                      resolution=0.5)
+  
+  # Perform UMAP
+  if(method == 'UMAP') {
+  gene_obj = RunUMAP(gene_obj, 
+                 dims=1:pcs)
+  }
+  
+    # Perform TSNE
+  if(method == 'TSNE') {
+  gene_obj = RunTSNE(gene_obj, 
+                 dims=1:pcs,
+                 seed.use = 1)
+  }
+  
+  return(gene_obj)
+}
+```
+
+# Function to run dorothea
+```{r}
+run_dorothea <- function(gene_obj, pcs=10){ 
+  
+  # Regulons for mouse
+  dorothea_regulon_mouse <- get(data("dorothea_mm", package = "dorothea"))
+  
+  ## We obtain the regulons based on interactions with confidence level A, B and C
+  regulon <- dorothea_regulon_mouse %>%
+    dplyr::filter(confidence %in% c("A","B","C"))
+  
+  ## We compute Viper Scores 
+  gene_obj <- run_viper(gene_obj, regulon,
+                           options = list(method = "scale", minsize = 4, 
+                                          eset.filter = FALSE, cores = 1, 
+                                          verbose = FALSE))
+  
+  
+  ## We compute the Nearest Neighbours to perform cluster
+  DefaultAssay(object = gene_obj) <- "dorothea"
+  gene_obj <- ScaleData(gene_obj)
+  gene_obj <- RunPCA(gene_obj, features = rownames(gene_obj), verbose = FALSE)
+  gene_obj <- FindNeighbors(gene_obj, dims = 1:pcs, verbose = FALSE)
+  gene_obj <- FindClusters(gene_obj, resolution = 0.5, verbose = FALSE)
+  
+  # Run UMAP
+  gene_obj <- RunUMAP(gene_obj, dims = 1:pcs, umap.method = "uwot", metric = "cosine")
+  
+  return(gene_obj)
+  
+}
+```
+
+# Select scaffold and subset based on cell type
+```{r}
+
+# select scaffold and show initial clustering of scaffold subset in context of all data
+scaf <- subset(pmn, subset = Tissue == 'scaffold')
+scaf$cellType <- Idents(scaf)
+DimPlot(scaf, reduction = "umap")
+
+# Add metadata
+scaf$dxHl <- ifelse(grepl('\\.h\\.', scaf$sample), 'Hlthy', 'Dx')
+
+
+granulocytes <- subset(scaf, subset = cellType == 'Granulocytes')
+macrophages <- subset(scaf, subset = cellType == 'Macrophages')
+dendritic <- subset(scaf, subset = cellType == 'Dendritic Cells')
+fibroblasts <-subset(scaf, subset = cellType == 'Fibroblasts')
+
+```
+
+# Cluster Dendritic Cells - UMAP
+```{r, warning=F, message=F}
+
+# Process the data
+dendritic <- process_data(dendritic, scTransform = T, varsToRegress = NULL, pcs = 14)
+
+#12 PCs chosen
+ElbowPlot(dendritic, ndims=100) +
+  theme_minimal() +
+  labs(title="Lung PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# Show clusters
+DimPlot(dendritic, reduction = "umap")
+dendritic$subcluster <- Idents(dendritic)
+
+# map dx vs healthy
+Idents(dendritic) <- dendritic$dxHl
+DimPlot(dendritic, reduction = "umap")
+
+
+```
+
+# Cluster Dendritic - TSNE
+```{r, warning=F, message=F}
+
+# Process the data
+dendritic <- process_data(dendritic, scTransform = T, varsToRegress = NULL, pcs = 12, method = 'TSNE')
+
+#12 PCs chosen
+ElbowPlot(dendritic, ndims=100) +
+  theme_minimal() +
+  labs(title="Lung PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# Show clusters
+DimPlot(dendritic, reduction = "tsne")
+dendritic$subcluster <- Idents(dendritic)
+
+Idents(dendritic) <- dendritic$dxHl
+DimPlot(dendritic, reduction = "tsne")
+
+```
+
+# Cluster Dendritic - Phate
+```{r}
+
+# get counts and set genes as cols and cells as rows
+counts <- t(as.matrix(GetAssayData(dendritic, slot = 'counts', assay = 'RNA')))
+counts <- as.data.frame(counts)
+id <- dendritic$dxHl
+
+# normalize data
+counts <- library.size.normalize(counts)
+counts <- sqrt(counts)
+
+# Phate
+counts_phate <- phate(counts, seed = 1)
+
+# Scatter dx vs healthy
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Scatter by sample
+id <- dendritic$sample
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Density plot
+ggplot(counts_phate, aes(x=PHATE1, y=PHATE2) ) +
+  geom_hex() +
+  theme_bw()
+
+# Phate cluster
+counts_phate_cluster <- phateR::cluster_phate(counts_phate, seed = 1, k=3)
+counts_phate_cluster <- paste0('phate', counts_phate_cluster)
+
+# Scatter
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=counts_phate_cluster))
+```
+
+# Cluster dendritic - Dorothea Clustering
+```{r}
+
+# run dorothea based on above function
+dendritic <- run_dorothea(dendritic, pcs = 17)
+Idents(dendritic) <- paste0('D', Idents(dendritic))
+
+# ensure PC optimization
+ElbowPlot(dendritic, ndims=100) +
+  theme_minimal() +
+  labs(title="Scaffold PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# macrophage markers by cluster
+dendritic.markers <- FindAllMarkers(dendritic, only.pos = TRUE, min.pct = 0.25, 
+                                        logfc.threshold = 0.25, verbose = FALSE)
+
+# Plot
+DimPlot(dendritic, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+# store TF activity clustering info
+dendritic$dorotheaClust <- Idents(dendritic)
+
+# overlay healthy/disease info
+Idents(dendritic) <- dendritic$dxHl
+DimPlot(dendritic, reduction = "umap", label = TRUE, pt.size = 0.5, , cols = c('black', 'chartreuse'))
+
+
+```
+
+
+# Cluster Granulocytes
+```{r, warning=F, message=F}
+
+# Process the data
+granulocytes <- process_data(granulocytes, scTransform = T, varsToRegress = NULL, pcs = 10)
+
+#12 PCs chosen
+ElbowPlot(granulocytes, ndims=100) +
+  theme_minimal() +
+  labs(title="Lung PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# Show clusters
+DimPlot(granulocytes, reduction = "umap")
+granulocytes$subcluster <- Idents(granulocytes)
+
+# Map dx vs healthy
+Idents(granulocytes) <- granulocytes$dxHl
+DimPlot(granulocytes, reduction = "umap")
+
+
+```
+
+# Cluster Granulocytes - TSNE
+```{r, warning=F, message=F}
+
+# Process the data
+granulocytes <- process_data(granulocytes, scTransform = T, varsToRegress = NULL, pcs = 12, method = 'TSNE')
+
+#12 PCs chosen
+ElbowPlot(granulocytes, ndims=100) +
+  theme_minimal() +
+  labs(title="Lung PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# Show clusters
+DimPlot(granulocytes, reduction = "tsne")
+granulocytes$subcluster <- Idents(granulocytes)
+
+Idents(granulocytes) <- granulocytes$dxHl
+DimPlot(granulocytes, reduction = "tsne")
+
+```
+
+# Cluster Granulocytes - Phate
+```{r}
+
+# get counts and set genes as cols and cells as rows
+counts <- t(as.matrix(GetAssayData(granulocytes, slot = 'counts', assay = 'RNA')))
+counts <- as.data.frame(counts)
+id <- granulocytes$dxHl
+
+# normalize data
+counts <- library.size.normalize(counts)
+counts <- sqrt(counts)
+
+# Phate
+counts_phate <- phate(counts, seed = 1)
+
+# Scatter dx vs healthy
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Scatter by sample
+id <- granulocytes$sample
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Density plot
+ggplot(counts_phate, aes(x=PHATE1, y=PHATE2) ) +
+  geom_hex() +
+  theme_bw()
+
+# Broaden clusters
+counts_phate <- phate(counts, seed = 1, knn = 4, decay = 200)
+
+# Re -Scatter dx vs healthy
+id <- granulocytes$dxHl
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Re-Scatter by sample
+id <- granulocytes$sample
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Density plot
+ggplot(counts_phate, aes(x=PHATE1, y=PHATE2) ) +
+  geom_hex() +
+  theme_bw()
+
+# Phate cluster
+counts_phate_cluster <- phateR::cluster_phate(counts_phate, seed = 1, k=4)
+counts_phate_cluster <- paste0('phate', counts_phate_cluster)
+
+# Scatter
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=counts_phate_cluster))
+```
+
+# Granulocytes - Dorothea Clustering
+```{r}
+
+# run dorothea based on above function
+granulocytes <- run_dorothea(granulocytes, pcs = 50)
+Idents(granulocytes) <- paste0('D', Idents(granulocytes))
+
+# ensure PC optimization
+ElbowPlot(granulocytes, ndims=100) +
+  theme_minimal() +
+  labs(title="Scaffold PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# macrophage markers by cluster
+granulocytes.markers <- FindAllMarkers(granulocytes, only.pos = TRUE, min.pct = 0.25, 
+                                        logfc.threshold = 0.25, verbose = FALSE)
+
+# Plot
+DimPlot(granulocytes, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+# store TF activity clustering info
+granulocytes$dorotheaClust <- Idents(granulocytes)
+
+# overlay healthy/disease info
+Idents(granulocytes) <- granulocytes$dxHl
+DimPlot(granulocytes, reduction = "umap", label = TRUE, pt.size = 0.5, , cols = c('black', 'chartreuse'))
+
+
+```
+
+
+# Cluster Macrophages - UMAP
+```{r, warning=F, message=F}
+
+# Process the data
+macrophages <- process_data(macrophages, scTransform = T, varsToRegress = NULL, pcs = 12)
+
+#12 PCs chosen
+ElbowPlot(macrophages, ndims=100) +
+  theme_minimal() +
+  labs(title="Lung PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# Show clusters
+DimPlot(macrophages, reduction = "umap")
+macrophages$subcluster <- Idents(macrophages)
+
+Idents(macrophages) <- macrophages$dxHl
+DimPlot(macrophages, reduction = "umap")
+
+```
+
+# Cluster Macrophages - TSNE
+```{r, warning=F, message=F}
+
+# Process the data
+macrophages <- process_data(macrophages, scTransform = T, varsToRegress = NULL, pcs = 12, method = 'TSNE')
+
+#12 PCs chosen
+ElbowPlot(macrophages, ndims=100) +
+  theme_minimal() +
+  labs(title="Lung PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# Show clusters
+DimPlot(macrophages, reduction = "tsne")
+macrophages$subcluster <- Idents(macrophages)
+
+Idents(macrophages) <- macrophages$dxHl
+DimPlot(macrophages, reduction = "tsne")
+
+```
+
+# Cluster macrophages - Phate
+```{r}
+
+# get counts and set genes as cols and cells as rows
+counts <- t(as.matrix(GetAssayData(macrophages, slot = 'counts', assay = 'RNA')))
+counts <- as.data.frame(counts)
+id <- macrophages$dxHl
+
+# normalize data
+counts <- library.size.normalize(counts)
+counts <- sqrt(counts)
+
+# Phate
+counts_phate <- phate(counts, seed = 1)
+
+# Scatter dx vs healthy
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Scatter by sample
+id <- macrophages$sample
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Density plot
+ggplot(counts_phate, aes(x=PHATE1, y=PHATE2) ) +
+  geom_hex() +
+  theme_bw()
+
+# Phate cluster
+counts_phate_cluster <- phateR::cluster_phate(counts_phate, seed = 1, k=5)
+counts_phate_cluster <- paste0('phate', counts_phate_cluster)
+
+# Scatter
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=counts_phate_cluster))
+```
+
+# Macrophages - Dorothea Clustering
+```{r}
+
+# run dorothea based on above function
+macrophages <- run_dorothea(macrophages, pcs = 10)
+Idents(macrophages) <- paste0('D', Idents(macrophages))
+
+# ensure PC optimization
+ElbowPlot(macrophages, ndims=100) +
+  theme_minimal() +
+  labs(title="Scaffold PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# macrophage markers by cluster
+macrophages.markers <- FindAllMarkers(macrophages, only.pos = TRUE, min.pct = 0.25, 
+                                        logfc.threshold = 0.25, verbose = FALSE)
+
+# Plot
+DimPlot(macrophages, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+# store TF activity clustering info
+macrophages$dorotheaClust <- Idents(macrophages)
+
+# overlay healthy/disease info
+Idents(macrophages) <- macrophages$dxHl
+DimPlot(macrophages, reduction = "umap", label = TRUE, pt.size = 0.5, , cols = c('black', 'chartreuse'))
+
+
+```
+
+# Cluster Fibroblasts
+```{r, warning=F, message=F}
+
+# Process the data
+fibroblasts <- process_data(fibroblasts, scTransform = T, varsToRegress = NULL, pcs = 30)
+
+#12 PCs chosen
+ElbowPlot(fibroblasts, ndims=100) +
+  theme_minimal() +
+  labs(title="Lung PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# Show clusters
+DimPlot(fibroblasts, reduction = "umap")
+fibroblasts$subcluster <- Idents(fibroblasts)
+
+# map dx vs healthy
+Idents(fibroblasts) <- fibroblasts$dxHl
+DimPlot(fibroblasts, reduction = "umap")
+
+
+```
+
+# Cluster Fibroblasts - TSNE
+```{r, warning=F, message=F}
+
+# Process the data
+fibroblasts <- process_data(fibroblasts, scTransform = T, varsToRegress = NULL, pcs = 12, method = 'TSNE')
+
+#12 PCs chosen
+ElbowPlot(fibroblasts, ndims=100) +
+  theme_minimal() +
+  labs(title="Lung PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# Show clusters
+DimPlot(fibroblasts, reduction = "tsne")
+fibroblasts$subcluster <- Idents(fibroblasts)
+
+Idents(fibroblasts) <- fibroblasts$dxHl
+DimPlot(fibroblasts, reduction = "tsne")
+
+```
+
+# Cluster fibroblasts - Phate
+```{r}
+
+# get counts and set genes as cols and cells as rows
+counts <- t(as.matrix(GetAssayData(fibroblasts, slot = 'counts', assay = 'RNA')))
+counts <- as.data.frame(counts)
+id <- fibroblasts$dxHl
+
+# normalize data
+counts <- library.size.normalize(counts)
+counts <- sqrt(counts)
+
+# Phate
+counts_phate <- phate(counts, seed = 1)
+
+# Scatter dx vs healthy
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Scatter by sample
+id <- fibroblasts$sample
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=id))
+
+# Density plot
+ggplot(counts_phate, aes(x=PHATE1, y=PHATE2) ) +
+  geom_hex() +
+  theme_bw()
+
+# Phate cluster
+counts_phate_cluster <- phateR::cluster_phate(counts_phate, seed = 1, k=3)
+counts_phate_cluster <- paste0('phate', counts_phate_cluster)
+
+# Scatter
+ggplot(counts_phate) +
+  geom_point(aes(PHATE1, PHATE2, color=counts_phate_cluster))
+```
+
+# fibroblasts - Dorothea Clustering
+```{r}
+
+# run dorothea based on above function
+fibroblasts <- run_dorothea(fibroblasts, pcs = 10)
+Idents(fibroblasts) <- paste0('D', Idents(fibroblasts))
+
+# ensure PC optimization
+ElbowPlot(fibroblasts, ndims=100) +
+  theme_minimal() +
+  labs(title="Scaffold PCA Elbow Plot", 
+       x="Principle Components", 
+       y="Standard deviations")
+
+# macrophage markers by cluster
+fibroblasts.markers <- FindAllMarkers(fibroblasts, only.pos = TRUE, min.pct = 0.25, 
+                                        logfc.threshold = 0.25, verbose = FALSE)
+
+# Plot
+DimPlot(fibroblasts, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+# store TF activity clustering info
+fibroblasts$dorotheaClust <- Idents(fibroblasts)
+
+# overlay healthy/disease info
+Idents(fibroblasts) <- fibroblasts$dxHl
+DimPlot(fibroblasts, reduction = "umap", label = TRUE, pt.size = 0.5, , cols = c('black', 'chartreuse'))
+
+
+```
+
+
+

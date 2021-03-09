@@ -1,0 +1,236 @@
+---
+title: "Immune cell data preprocessing"
+author: "Scott Campit"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+    theme: united
+---
+
+# Summary
+This notebook looks for differences in clustering between subpopualtions with and without regressing out mitochondrial genes
+
+# 1. Load libraries
+```{r, echo=F}
+library(mgcv)
+library(splines)
+library(Seurat)
+library(tidyverse)
+library(viridis)
+library(matrixStats)
+library(UpSetR)
+library(reshape2)
+library(ggplot2)
+library(phateR)
+library(reticulate)
+#install.packages('readxl')
+library(readxl)
+
+#install.packages('sctransform')
+library(sctransform)
+```
+
+# 2. Load the data
+This code block does the following with the lung dataset:
+
+  1. Log normalized.
+  2. Scaling the data based on genes
+  3. Get the Shared Nearest Neighbors. I'm using the default setting of 1:10, **but this can be optimized further.** 
+  4. Identify clusters of cells by Shared Nearest Neighbors. Again, **the parameters can be optimized further.** 
+  5. Run Uniform Manifold Approximation and Projection. Again, **the parameters can be optimized further.** 
+  
+Note that there were cell-type annotations in the meta data. I used those for visualization.
+```{r}
+rm(list=ls())
+#load("C:/Users/scott/Data/scRNASeq/shea/lung.robj", verbose=TRUE)
+load("/nfs/turbo/umms-csriram/scampit/Ryan/Projects/Dorothea/data/lung.Robj", verbose=TRUE)
+
+orig.ident = lung@active.ident
+```
+
+# 3. Analyze the data distribution
+We'll analyze the underlying data distribution. Additionally, we'll perform the following data preprocessing steps:
+  * Remove genes with a library size less than 250
+  * Remove cells with no gene expression
+  * Remove cells that are not expressed
+```{r}
+
+data_preprocessing = function(seurat_obj, 
+                              min_library_size=250,
+                              min_total_expr=1,
+                              min_no_of_cells=5){
+  
+  seurat_obj = subset(seurat_obj, subset = nCount_RNA >= min_library_size)
+  
+}
+```
+
+
+# 4. Create function that will perform all downstream preprocessing steps.
+For more in-depth sanity checking, you can check out the `eda_all_genes.Rmd` file. In short, the following is performed:
+  1. Identify variable features
+  2. Log normalize the data
+  3. Scale the data 
+  4. Run PCA
+  5. Identify shortest nearest neighbors and clusters
+  6. Perform UMAP
+  
+```{r}
+# note: added option to forgo sct and include vars to regress so initial qc steps could be run via this function
+process_data = function(gene_obj, scTransform = F, varsToRegress = NULL){
+  
+  # Identify variable features
+  gene_obj = FindVariableFeatures(object=gene_obj, 
+                              mean.function=ExpMean,
+                              dispersion.function=LogVMR,
+                              selection.method='vst',
+                              x.low.cutoff=-Inf,
+                              x.high.cutoff=Inf,
+                              y.cutoff=Inf,
+                              nfeatures = 2000)
+  
+  # Log normalize data
+  gene_obj = NormalizeData(gene_obj, 
+                       normalization.method='LogNormalize', 
+                       scale.factor=10000)
+  
+  # Scale data
+  all.genes = rownames(gene_obj)
+  gene_obj = ScaleData(gene_obj, 
+                   features=all.genes)
+  
+  # SCT transform
+  if(scTransform == T){
+    print('SCT activated')
+    gene_obj = SCTransform(gene_obj,
+                           vars.to.regress = varsToRegress,
+                           verbose=F)
+  }
+  
+  # Run PCA
+  gene_obj = RunPCA(object=gene_obj,
+                npcs=50,
+                verbose=FALSE)
+  
+  # Find shortest nearest neighbors and clusters
+  gene_obj = FindNeighbors(gene_obj, 
+                       dims=1:50,
+                       reduction='pca')
+  gene_obj = FindClusters(gene_obj, 
+                      resolution=0.5)
+  
+  # Perform UMAP
+  gene_obj = RunUMAP(gene_obj, 
+                 dims=1:50)
+  
+  return(gene_obj)
+}
+```
+
+# 5. Create object without mitochondrial genes for clustering
+First, we need to identify mitochondrial genes that may be confounding factors (based on the experimental design). We'll also normalize based on this known confounding factor.
+
+Note - these need to be identified using Mitocarta.
+```{r, message=F, warning=F}
+
+# Create seperate lung.mt value to compare clustering
+lung.mt <- lung
+lung.mt = PercentageFeatureSet(lung,
+                           pattern = "^Mt-",
+                           col.name = "percent.mt")
+```
+
+
+# 6. Split data to be separate cell lines
+We'll first split the data to be separate lineages. I will analyze 4 specifically:
+  1. Neutrophils
+  2. NK cells
+  3. T cells
+  4. Granulocytes
+  
+## Including mito genes
+```{r}
+
+orig.indent = lung@active.ident
+celltype.list = SplitObject(lung, split.by="CellType")
+
+# Create separate Seurat objects to visualize.
+neutrophils   = celltype.list$Neutrophils
+nk            = celltype.list$`NK Cells`
+tcell         = celltype.list$`T Cells`
+gran          = celltype.list$Granulocytes
+
+
+```
+## Mitochondrial gene free
+```{r}
+
+orig.indent = lung.mt@active.ident
+celltype.list = SplitObject(lung.mt, split.by="CellType")
+
+# Create separate Seurat objects to visualize.
+neutrophils.mt   = celltype.list$Neutrophils
+nk.mt            = celltype.list$`NK Cells`
+tcell.mt         = celltype.list$`T Cells`
+gran.mt          = celltype.list$Granulocytes
+
+```
+
+# 7. Perform subsetting on Neutrophils
+This analysis subsets based on predicted clusters.
+```{r, warning=F, message=F}
+neutrophils = process_data(neutrophils, scTransform = T, varsToRegress = NULL)
+
+# Percent MT regressed out
+neutrophils.mt = process_data(neutrophils.mt, scTransform = T, varsToRegress = "percent.mt")
+
+```
+```{r}
+
+# Plot based on predicted clusters
+DimPlot(neutrophils, 
+        reduction="umap",
+        dims=c(1, 2),
+        label=TRUE,
+        repel=TRUE,
+        label.size=4,
+        na.value = "grey50") + 
+        labs(x="UMAP 1", y="UMAP 2", title="Neutrophils") +
+        theme_minimal() +
+        theme(plot.title = element_text(size=25),
+              legend.text=element_text(size=20),
+              axis.title.x=element_text(size=20),
+              axis.title.y=element_text(size=20),
+              axis.text.x=element_text(size=20),
+              axis.text.y=element_text(size=20)) +
+        geom_hline(yintercept=0) +
+        geom_vline(xintercept=0)
+
+
+
+# Plot based on predicted clusters
+DimPlot(neutrophils.mt, 
+        reduction="umap",
+        dims=c(1, 2),
+        label=TRUE,
+        repel=TRUE,
+        label.size=4,
+        na.value = "grey50") + 
+        labs(x="UMAP 1", y="UMAP 2", title= "Neutrophils - Mito genes regressed") +
+        theme_minimal() +
+        theme(plot.title = element_text(size=25),
+              legend.text=element_text(size=20),
+              axis.title.x=element_text(size=20),
+              axis.title.y=element_text(size=20),
+              axis.text.x=element_text(size=20),
+              axis.text.y=element_text(size=20)) +
+        geom_hline(yintercept=0) +
+        geom_vline(xintercept=0)
+
+```
+
+
+
