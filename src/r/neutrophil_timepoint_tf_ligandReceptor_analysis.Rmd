@@ -24,10 +24,10 @@ library('tibble')
 library(ComplexHeatmap)
 
 # lung neutrophils
-load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/Dorothea/data/lung.neut.Robj')
+load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/single-cell-neutrophil-flux-analysis/data/lung.neut.Robj')
 
 # all lung cells
-load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/Dorothea/data/lung.Robj')
+load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/single-cell-neutrophil-flux-analysis/data/lung.Robj')
 
 
 ```
