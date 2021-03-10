@@ -34,7 +34,7 @@ load('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/single-cell-neutrophil-flux-
 
 
 # 2. Modify monocytes and lung metadata PRN
-```{r}
+```{r, warning=F}
 
 # Add disease vs healthy category
 mon$dxHl <- ifelse(grepl('\\.h\\.', mon$sample), 'Hlthy', 'Dx')
@@ -43,6 +43,7 @@ lung$dxHl <- ifelse(grepl('\\.h\\.', lung$sample), 'Hlthy', 'Dx')
 
 # Comparison category
 mon$comp <- ifelse(mon$dxHl == 'Hlthy', 'Hlthy', mon$sample)
+mon$comp <- factor(mon$comp, levels = c('Hlthy', 'lung.d.d7', 'lung.d.d14', 'lung.d.d21'))
 
 ```
 

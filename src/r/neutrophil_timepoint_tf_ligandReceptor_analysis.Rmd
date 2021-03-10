@@ -43,6 +43,7 @@ lung$dxHl <- ifelse(grepl('\\.h\\.', lung$sample), 'Hlthy', 'Dx')
 
 # Comparison category
 neut$comp <- ifelse(neut$dxHl == 'Hlthy', 'Hlthy', neut$sample)
+neut$comp <- factor(neut$comp, levels = c('Hlthy', 'lung.d.d7', 'lung.d.d14', 'lung.d.d21'))
 
 ```
 
@@ -172,9 +173,9 @@ h <- Heatmap(t_summarized_viper_scores_df,
 h
 
 # save to pdf
-pdf('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/single-cell-neutrophil-flux-analysis/out/dorothea_neutrophils_expressed_TFs.pdf', height = 5.5, width = 2.5)
-h
-dev.off()
+#pdf('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/single-cell-neutrophil-flux-analysis/out/dorothea_neutrophils_expressed_TFs.pdf', height = 5.5, width = 2.5)
+#h
+#dev.off()
 
 ```
 
@@ -224,13 +225,17 @@ H
 ## 5A. Load data required to run nichenet
 ```{r}
 # Ligand target
-ligand_target_matrix = readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+#ligand_target_matrix = readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+ligand_target_matrix = readRDS('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/single-cell-neutrophil-flux-analysis/data/ligand_target_matrix.rds')
 
 # Ligand receptor
-lr_network = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+#lr_network = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+lr_network = readRDS('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/single-cell-neutrophil-flux-analysis/data/lr_network.rds')
+
 
 # weighted integrated network
-weighted_networks = readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+#weighted_networks = readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+weighted_networks = readRDS('/nfs/turbo/umms-csriram/scampit/Ryan/Projects/single-cell-neutrophil-flux-analysis/data/weighted_networks.rds')
 
 ```
 
